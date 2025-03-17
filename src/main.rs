@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+
+use wireguard_control::backends::kernel as wg;
 
 const CONFIG_PATH: &str = "/data/wg.peers";
 
@@ -64,7 +66,7 @@ impl From<std::net::AddrParseError> for ConfigError {
 }
 
 impl From<wireguard_control::InvalidKey> for ConfigError {
-    fn from(e: wireguard_control::InvalidKey) -> ConfigError {
+    fn from(_: wireguard_control::InvalidKey) -> ConfigError {
         ConfigError::InvalidKey
     }
 }
@@ -84,14 +86,43 @@ impl From<std::num::ParseIntError> for ConfigError {
 impl std::error::Error for ConfigError {}
 
 #[derive(Debug)]
+enum SetupError {
+    InvalidInterfaceName(String, wireguard_control::InvalidInterfaceName),
+    Io(io::Error),
+}
+
+impl fmt::Display for SetupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "set up link:")?;
+
+        match self {
+            Self::InvalidInterfaceName(name, e) => {
+                write!(f, "invalid interface name {}: {}", name, e)
+            }
+            Self::Io(e) => write!(f, "io: {}", e),
+        }
+    }
+}
+
+impl From<io::Error> for SetupError {
+    fn from(e: io::Error) -> SetupError {
+        SetupError::Io(e)
+    }
+}
+
+impl std::error::Error for SetupError {}
+
+#[derive(Debug)]
 enum Error {
     Config(ConfigError),
+    Setup(SetupError),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Config(e) => e.fmt(f),
+            Self::Setup(e) => e.fmt(f),
         }
     }
 }
@@ -99,6 +130,12 @@ impl fmt::Display for Error {
 impl From<ConfigError> for Error {
     fn from(e: ConfigError) -> Error {
         Error::Config(e)
+    }
+}
+
+impl From<SetupError> for Error {
+    fn from(e: SetupError) -> Error {
+        Error::Setup(e)
     }
 }
 
@@ -305,4 +342,83 @@ fn run() -> Result<(), Error> {
     };
     let mut br = io::BufReader::new(f);
     let config = Config::parse(&mut br)?;
+
+    for (name, link_stanza) in config.links {
+        match link_stanza {
+            LinkStanza::Link(link) => {
+                delete(name.clone())?;
+                configure(name, link)?;
+            }
+            LinkStanza::Delete => delete(name)?,
+        };
+    }
+
+    Ok(())
+}
+
+fn configure(name: String, link: Link) -> Result<(), SetupError> {
+    let addresses_pretty = link
+        .addresses
+        .iter()
+        .map(|(addr, cidr)| format!("{}/{}", addr, cidr))
+        .reduce(|acc, net| acc + " " + &net)
+        .unwrap_or_default();
+
+    let allowed_ips_pretty = link
+        .allowed_ips
+        .iter()
+        .map(|net| format!("{}/{}", net.address, net.cidr))
+        .reduce(|acc, net| acc + " " + &net)
+        .unwrap_or_default();
+
+    println!("[info] configure {}", name);
+    println!("[info]   endpoint: {}", link.endpoint);
+    println!("[info]   private key: (hidden)");
+    println!("[info]   public key: {}", link.public_key.to_base64());
+    println!("[info]   preshared key: (hidden)");
+    println!("[info]   addresses: {}", addresses_pretty);
+    println!("[info]   AllowedIPs: {}", allowed_ips_pretty);
+    if link.keepalive_seconds == 0 {
+        println!("[info]   keepalive: disabled");
+    } else {
+        println!("[info]   keepalive: {}", link.keepalive_seconds);
+    }
+
+    let iface: wireguard_control::InterfaceName = match name.parse() {
+        Ok(name) => name,
+        Err(e) => return Err(SetupError::InvalidInterfaceName(name, e)),
+    };
+
+    let mut peer = wireguard_control::PeerConfigBuilder::new(&link.public_key)
+        .set_endpoint(link.endpoint)
+        .set_preshared_key(link.preshared_key)
+        .replace_allowed_ips()
+        .add_allowed_ips(&link.allowed_ips);
+
+    if link.keepalive_seconds != 0 {
+        peer = peer.set_persistent_keepalive_interval(link.keepalive_seconds);
+    }
+
+    wireguard_control::DeviceUpdate::new()
+        .set_keypair(wireguard_control::KeyPair::from_private(link.private_key))
+        .replace_peers()
+        .randomize_listen_port()
+        .add_peer(peer)
+        .apply(&iface, wireguard_control::Backend::Kernel)?;
+
+    Ok(())
+}
+
+fn delete(name: String) -> Result<(), SetupError> {
+    let iface: wireguard_control::InterfaceName = match name.parse() {
+        Ok(name) => name,
+        Err(e) => return Err(SetupError::InvalidInterfaceName(name, e)),
+    };
+
+    match wg::delete_interface(&iface) {
+        Ok(_) => {}
+        Err(e) => println!("[warn] delete {}: {}", name, e),
+    };
+
+    Ok(())
 }
