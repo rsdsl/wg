@@ -95,7 +95,7 @@ enum SetupError {
 
 impl fmt::Display for SetupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "set up link:")?;
+        write!(f, "set up link: ")?;
 
         match self {
             Self::InvalidInterfaceName(name, e) => {
