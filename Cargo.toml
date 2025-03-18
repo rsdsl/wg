@@ -6,4 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rsdsl_netlinklib = { git = "https://github.com/rsdsl/netlinklib.git", features = ["blocking"] }
 wireguard-control = "1.6.1"

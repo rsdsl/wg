@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 
+use rsdsl_netlinklib::blocking as nl;
 use wireguard_control::backends::kernel as wg;
 
 const CONFIG_PATH: &str = "/data/wg.peers";
@@ -91,6 +92,7 @@ impl std::error::Error for ConfigError {}
 enum SetupError {
     InvalidInterfaceName(String, wireguard_control::InvalidInterfaceName),
     Io(io::Error),
+    Netlinklib(rsdsl_netlinklib::Error),
 }
 
 impl fmt::Display for SetupError {
@@ -102,6 +104,7 @@ impl fmt::Display for SetupError {
                 write!(f, "invalid interface name {}: {}", name, e)
             }
             Self::Io(e) => write!(f, "io: {}", e),
+            Self::Netlinklib(e) => write!(f, "rsdsl_netlinklib: {}", e),
         }
     }
 }
@@ -109,6 +112,12 @@ impl fmt::Display for SetupError {
 impl From<io::Error> for SetupError {
     fn from(e: io::Error) -> SetupError {
         SetupError::Io(e)
+    }
+}
+
+impl From<rsdsl_netlinklib::Error> for SetupError {
+    fn from(e: rsdsl_netlinklib::Error) -> SetupError {
+        SetupError::Netlinklib(e)
     }
 }
 
@@ -144,13 +153,18 @@ impl From<SetupError> for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug)]
+struct IpConfig {
+    addresses: Vec<(IpAddr, u8)>,
+    allowed_ips: Vec<wireguard_control::AllowedIp>,
+}
+
+#[derive(Debug)]
 struct Link {
     endpoint: SocketAddr,
     private_key: wireguard_control::Key,
     public_key: wireguard_control::Key,
     preshared_key: wireguard_control::Key,
-    addresses: Vec<(IpAddr, u8)>,
-    allowed_ips: Vec<wireguard_control::AllowedIp>,
+    ip_config: IpConfig,
     keepalive_seconds: u16,
 }
 
@@ -282,8 +296,10 @@ impl LinkConfig {
                 private_key,
                 public_key,
                 preshared_key,
-                addresses,
-                allowed_ips,
+                ip_config: IpConfig {
+                    addresses,
+                    allowed_ips,
+                },
                 keepalive_seconds,
             }),
         })
@@ -355,6 +371,7 @@ fn run() -> Result<(), Error> {
 
 fn configure(name: String, link: Link) -> Result<(), SetupError> {
     let addresses_pretty = link
+        .ip_config
         .addresses
         .iter()
         .map(|(addr, cidr)| format!("{}/{}", addr, cidr))
@@ -362,6 +379,7 @@ fn configure(name: String, link: Link) -> Result<(), SetupError> {
         .unwrap_or_default();
 
     let allowed_ips_pretty = link
+        .ip_config
         .allowed_ips
         .iter()
         .map(|net| format!("{}/{}", net.address, net.cidr))
@@ -390,7 +408,7 @@ fn configure(name: String, link: Link) -> Result<(), SetupError> {
         .set_endpoint(link.endpoint)
         .set_preshared_key(link.preshared_key)
         .replace_allowed_ips()
-        .add_allowed_ips(&link.allowed_ips);
+        .add_allowed_ips(&link.ip_config.allowed_ips);
 
     if link.keepalive_seconds != 0 {
         peer = peer.set_persistent_keepalive_interval(link.keepalive_seconds);
@@ -402,6 +420,25 @@ fn configure(name: String, link: Link) -> Result<(), SetupError> {
         .randomize_listen_port()
         .add_peer(peer)
         .apply(&iface, wireguard_control::Backend::Kernel)?;
+
+    configure_netlink(name, link.ip_config)
+}
+
+fn configure_netlink(name: String, ip_config: IpConfig) -> Result<(), SetupError> {
+    let conn = nl::Connection::new()?;
+
+    conn.link_set(name.clone(), true)?;
+
+    for (addr, prefix_length) in ip_config.addresses {
+        conn.address_add(name.clone(), addr, prefix_length)?;
+    }
+
+    for wireguard_control::AllowedIp { address, cidr } in ip_config.allowed_ips {
+        match address {
+            IpAddr::V4(address) => conn.route_add4(address, cidr, None, name.clone()),
+            IpAddr::V6(address) => conn.route_add6(address, cidr, None, name.clone()),
+        }?;
+    }
 
     Ok(())
 }
