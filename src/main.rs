@@ -11,6 +11,7 @@ const CONFIG_PATH: &str = "/data/wg.peers";
 #[derive(Debug)]
 enum ConfigError {
     AddrParse(std::net::AddrParseError),
+    BlankLine,
     DuplicateLink(String),
     Eof,
     ExpectedLinkStanza(String),
@@ -35,6 +36,7 @@ impl fmt::Display for ConfigError {
 
         match self {
             Self::AddrParse(e) => write!(f, "parse IP address: {}", e),
+            Self::BlankLine => write!(f, "empty line"),
             Self::DuplicateLink(name) => write!(f, "duplicate link {}", name),
             Self::Eof => write!(f, "EOF"),
             Self::ExpectedLinkStanza(kw) => {
@@ -171,6 +173,10 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::Eof);
         }
+        if head == "\n" {
+            return Err(ConfigError::BlankLine);
+        }
+        head.pop();
 
         let head: Vec<&str> = head.split(' ').collect();
         if head.len() < 2 {
@@ -194,6 +200,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoEndpoint(name));
         }
+        endpoint.pop();
         let endpoint: SocketAddr = endpoint.parse()?;
 
         let mut private_key = String::new();
@@ -201,6 +208,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoPrivateKey(name));
         }
+        private_key.pop();
         let private_key = wireguard_control::Key::from_base64(&private_key)?;
 
         let mut public_key = String::new();
@@ -208,6 +216,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoPublicKey(name));
         }
+        public_key.pop();
         let public_key = wireguard_control::Key::from_base64(&public_key)?;
 
         let mut preshared_key = String::new();
@@ -215,6 +224,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoPresharedKey(name));
         }
+        preshared_key.pop();
         let preshared_key = wireguard_control::Key::from_base64(&preshared_key)?;
 
         let mut addresses = String::new();
@@ -222,6 +232,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoAddresses(name));
         }
+        addresses.pop();
 
         let address_strs = addresses.split(' ');
         let mut addresses = Vec::new();
@@ -243,6 +254,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoAllowedIps(name));
         }
+        allowed_ips.pop();
 
         let allowed_ip_strs = allowed_ips.split(' ');
         let mut allowed_ips = Vec::new();
@@ -259,6 +271,7 @@ impl LinkConfig {
         if n == 0 {
             return Err(ConfigError::NoKeepaliveInterval(name));
         }
+        keepalive_seconds.pop();
 
         let keepalive_seconds: u16 = keepalive_seconds.parse()?;
 
@@ -286,14 +299,11 @@ impl Config {
     fn parse<R: io::BufRead>(r: &mut R) -> Result<Self, ConfigError> {
         let mut links = HashMap::new();
         loop {
-            let eof = Self::skip_blank_lines(r)?;
-            if eof {
-                break;
-            }
-
             let link_config = LinkConfig::parse(r);
-            if let Err(ConfigError::Eof) = link_config {
-                break;
+            match link_config {
+                Err(ConfigError::BlankLine) => continue,
+                Err(ConfigError::Eof) => break,
+                _ => {}
             }
             let link_config = link_config?;
 
@@ -306,19 +316,6 @@ impl Config {
         }
 
         Ok(Self { links })
-    }
-
-    fn skip_blank_lines<R: io::BufRead>(r: &mut R) -> Result<bool, ConfigError> {
-        let mut s = String::new();
-        while r.read_line(&mut s)? > 0 {
-            if s != "\n" {
-                return Ok(false);
-            }
-
-            s.clear();
-        }
-
-        Ok(true)
     }
 }
 
