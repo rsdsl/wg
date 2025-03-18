@@ -413,7 +413,7 @@ fn delete(name: String) -> Result<(), SetupError> {
     };
 
     match wg::delete_interface(&iface) {
-        Ok(_) => {}
+        Ok(_) => println!("[info] delete {}", name),
         Err(e) => println!("[warn] delete {}: {}", name, e),
     };
 
