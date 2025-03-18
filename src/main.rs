@@ -433,29 +433,6 @@ fn configure_netlink(name: String, ip_config: IpConfig) -> Result<(), SetupError
         conn.address_add(name.clone(), addr, prefix_length)?;
     }
 
-    for wireguard_control::AllowedIp { address, cidr } in ip_config.allowed_ips {
-        match address {
-            IpAddr::V4(address) => conn.route_add4(rsdsl_netlinklib::route::Route4 {
-                dst: address,
-                prefix_len: cidr,
-                rtr: None,
-                on_link: false,
-                table: None,
-                metric: None,
-                link: name.clone(),
-            }),
-            IpAddr::V6(address) => conn.route_add6(rsdsl_netlinklib::route::Route6 {
-                dst: address,
-                prefix_len: cidr,
-                rtr: None,
-                on_link: false,
-                table: None,
-                metric: None,
-                link: name.clone(),
-            }),
-        }?;
-    }
-
     Ok(())
 }
 
