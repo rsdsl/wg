@@ -28,6 +28,7 @@ enum ConfigError {
     NoAddresses(String),
     NoAllowedIps(String),
     NoKeepaliveInterval(String),
+    NoFwmark(String),
     ParseInt(std::num::ParseIntError),
 }
 
@@ -57,6 +58,7 @@ impl fmt::Display for ConfigError {
             Self::NoKeepaliveInterval(link) => {
                 write!(f, "missing keepalive interval for link {}", link)
             }
+            Self::NoFwmark(link) => write!(f, "missing fwmark for link {}", link),
             Self::ParseInt(e) => write!(f, "parse int: {}", e),
         }
     }
@@ -166,6 +168,7 @@ struct Link {
     preshared_key: wireguard_control::Key,
     ip_config: IpConfig,
     keepalive_seconds: u16,
+    fwmark: u32,
 }
 
 #[derive(Debug)]
@@ -289,6 +292,15 @@ impl LinkConfig {
 
         let keepalive_seconds: u16 = keepalive_seconds.parse()?;
 
+        let mut fwmark = String::new();
+        n = r.read_line(&mut fwmark)?;
+        if n == 0 {
+            return Err(ConfigError::NoFwmark(name));
+        }
+        fwmark.pop();
+
+        let fwmark: u32 = fwmark.parse()?;
+
         Ok(Self {
             name,
             link: LinkStanza::Link(Link {
@@ -301,6 +313,7 @@ impl LinkConfig {
                     allowed_ips,
                 },
                 keepalive_seconds,
+                fwmark,
             }),
         })
     }
@@ -398,6 +411,11 @@ fn configure(name: String, link: Link) -> Result<(), SetupError> {
     } else {
         println!("[info]   keepalive: {}", link.keepalive_seconds);
     }
+    if link.fwmark == 0 {
+        println!("[info]   fwmark: disabled");
+    } else {
+        println!("[info]   fwmark: {}", link.fwmark);
+    }
 
     let iface: wireguard_control::InterfaceName = match name.parse() {
         Ok(name) => name,
@@ -414,12 +432,15 @@ fn configure(name: String, link: Link) -> Result<(), SetupError> {
         peer = peer.set_persistent_keepalive_interval(link.keepalive_seconds);
     }
 
-    wireguard_control::DeviceUpdate::new()
+    let mut dev = wireguard_control::DeviceUpdate::new()
         .set_keypair(wireguard_control::KeyPair::from_private(link.private_key))
         .replace_peers()
         .randomize_listen_port()
-        .add_peer(peer)
-        .apply(&iface, wireguard_control::Backend::Kernel)?;
+        .add_peer(peer);
+    if link.fwmark != 0 {
+        dev = dev.set_fwmark(link.fwmark);
+    }
+    dev.apply(&iface, wireguard_control::Backend::Kernel)?;
 
     configure_netlink(name, link.ip_config)
 }
